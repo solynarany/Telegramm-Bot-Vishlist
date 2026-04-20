@@ -1,0 +1,9 @@
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS weekly_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            weekday INTEGER NOT NULL,
+            task_text TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
