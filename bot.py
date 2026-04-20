@@ -57,6 +57,7 @@ def init_db():
         )
     """)
 
+    # Повторяющиеся задачи по дням недели
     cur.execute("""
         CREATE TABLE IF NOT EXISTS weekly_tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,10 +68,27 @@ def init_db():
         )
     """)
 
+    # Разовые задачи по дням недели
+    # added_to_date = в какой день эта задача уже была перенесена в обычные задачи
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS weekday_once_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            weekday INTEGER NOT NULL,
+            task_text TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            is_used INTEGER DEFAULT 0,
+            added_to_date TEXT
+        )
+    """)
+
     conn.commit()
     conn.close()
 
 
+# =========================
+# ОБЫЧНЫЕ ЗАДАЧИ
+# =========================
 def add_task(user_id: int, task_text: str, task_date: str | None = None):
     if task_date is None:
         task_date = date.today().strftime("%Y-%m-%d")
@@ -84,22 +102,6 @@ def add_task(user_id: int, task_text: str, task_date: str | None = None):
         user_id,
         task_text,
         task_date,
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    ))
-    conn.commit()
-    conn.close()
-
-
-def add_weekly_task(user_id: int, weekday: int, task_text: str):
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO weekly_tasks (user_id, weekday, task_text, created_at)
-        VALUES (?, ?, ?, ?)
-    """, (
-        user_id,
-        weekday,
-        task_text,
         datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ))
     conn.commit()
@@ -189,6 +191,25 @@ def delete_task(user_id: int, task_id: int) -> bool:
     return True
 
 
+# =========================
+# ПОВТОРЯЮЩИЕСЯ ПО ДНЯМ НЕДЕЛИ
+# =========================
+def add_weekly_task(user_id: int, weekday: int, task_text: str):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO weekly_tasks (user_id, weekday, task_text, created_at)
+        VALUES (?, ?, ?, ?)
+    """, (
+        user_id,
+        weekday,
+        task_text,
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ))
+    conn.commit()
+    conn.close()
+
+
 def get_weekly_tasks(user_id: int):
     conn = get_connection()
     cur = conn.cursor()
@@ -239,20 +260,119 @@ def delete_weekly_task(user_id: int, weekly_task_id: int) -> bool:
     return True
 
 
-def add_today_tasks_from_weekday(user_id: int) -> int:
+# =========================
+# РАЗОВЫЕ ПО ДНЯМ НЕДЕЛИ
+# =========================
+def add_weekday_once_task(user_id: int, weekday: int, task_text: str):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO weekday_once_tasks (user_id, weekday, task_text, created_at, is_used, added_to_date)
+        VALUES (?, ?, ?, ?, 0, NULL)
+    """, (
+        user_id,
+        weekday,
+        task_text,
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ))
+    conn.commit()
+    conn.close()
+
+
+def get_weekday_once_tasks(user_id: int):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, weekday, task_text, is_used, added_to_date
+        FROM weekday_once_tasks
+        WHERE user_id = ?
+        ORDER BY is_used ASC, weekday ASC, id ASC
+    """, (user_id,))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def get_weekday_once_tasks_for_day(user_id: int, weekday: int):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, weekday, task_text
+        FROM weekday_once_tasks
+        WHERE user_id = ? AND weekday = ? AND is_used = 0
+        ORDER BY id ASC
+    """, (user_id, weekday))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def mark_weekday_once_task_used(task_id: int, task_date: str):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE weekday_once_tasks
+        SET is_used = 1,
+            added_to_date = ?
+        WHERE id = ?
+    """, (task_date, task_id))
+    conn.commit()
+    conn.close()
+
+
+def delete_weekday_once_task(user_id: int, task_id: int) -> bool:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id FROM weekday_once_tasks
+        WHERE user_id = ? AND id = ?
+    """, (user_id, task_id))
+    row = cur.fetchone()
+
+    if not row:
+        conn.close()
+        return False
+
+    cur.execute("""
+        DELETE FROM weekday_once_tasks
+        WHERE user_id = ? AND id = ?
+    """, (user_id, task_id))
+    conn.commit()
+    conn.close()
+    return True
+
+
+# =========================
+# АВТОДОБАВЛЕНИЕ ДЕЛ ДНЯ
+# =========================
+def add_today_tasks_from_weekday(user_id: int) -> tuple[int, int]:
     today_weekday = date.today().weekday()
-    weekly_rows = get_weekly_tasks_for_day(user_id, today_weekday)
     today_str = date.today().strftime("%Y-%m-%d")
+
     today_existing = get_tasks_by_date(user_id, today_str)
     today_texts = {row[1].strip().lower() for row in today_existing}
 
-    added_count = 0
+    added_once = 0
+    added_repeat = 0
+
+    # Разовые задачи по дню недели
+    once_rows = get_weekday_once_tasks_for_day(user_id, today_weekday)
+    for task_id, _, task_text in once_rows:
+        if task_text.strip().lower() not in today_texts:
+            add_task(user_id, task_text, today_str)
+            mark_weekday_once_task_used(task_id, today_str)
+            today_texts.add(task_text.strip().lower())
+            added_once += 1
+
+    # Повторяющиеся задачи по дню недели
+    weekly_rows = get_weekly_tasks_for_day(user_id, today_weekday)
     for _, _, task_text in weekly_rows:
         if task_text.strip().lower() not in today_texts:
             add_task(user_id, task_text, today_str)
-            added_count += 1
+            today_texts.add(task_text.strip().lower())
+            added_repeat += 1
 
-    return added_count
+    return added_once, added_repeat
 
 
 def get_unfinished_tasks_from_yesterday(user_id: int):
@@ -296,27 +416,12 @@ def clear_state(user_id: int):
     user_states.pop(user_id, None)
 
 
-def set_state(user_id: int, state: str):
+def set_state(user_id: int, state):
     user_states[user_id] = state
 
 
 def get_state(user_id: int):
     return user_states.get(user_id)
-
-
-def set_temp_value(user_id: int, key: str, value):
-    if user_id not in user_states:
-        user_states[user_id] = {}
-    if isinstance(user_states[user_id], str):
-        user_states[user_id] = {"mode": user_states[user_id]}
-    user_states[user_id][key] = value
-
-
-def get_temp_value(user_id: int, key: str, default=None):
-    state = user_states.get(user_id, {})
-    if isinstance(state, dict):
-        return state.get(key, default)
-    return default
 
 
 # =========================
@@ -327,28 +432,36 @@ def main_keyboard():
     kb.row("➕ Добавить задачу", "📋 Сегодня")
     kb.row("✅ Выполнить", "🗑 Удалить")
     kb.row("📜 История", "🔁 Повторяющиеся")
-    kb.row("📥 Добавить задачи дня", "🔄 Перенести невыполненные")
-    kb.row("❌ Отмена", "ℹ️ Помощь")
+    kb.row("📅 По дням недели", "📥 Добавить задачи дня")
+    kb.row("🔄 Перенести невыполненные", "❌ Отмена")
+    kb.row("ℹ️ Помощь")
     return kb
 
 
 def add_task_type_keyboard():
     kb = types.InlineKeyboardMarkup()
-    kb.row(
-        types.InlineKeyboardButton("📝 Обычная", callback_data="add_type_once"),
-        types.InlineKeyboardButton("🔁 Повторяющаяся", callback_data="add_type_weekly"),
-    )
+    kb.row(types.InlineKeyboardButton("📝 На сегодня", callback_data="add_type_once_today"))
+    kb.row(types.InlineKeyboardButton("📅 По дням недели (один раз)", callback_data="add_type_weekday_once"))
+    kb.row(types.InlineKeyboardButton("🔁 Повторяющаяся", callback_data="add_type_weekly"))
     return kb
 
 
-def weekday_keyboard():
+def selected_days_keyboard(selected_days: set[int]):
     kb = types.InlineKeyboardMarkup(row_width=3)
-    buttons = [
-        types.InlineKeyboardButton(title, callback_data=f"weekday_{num}")
-        for title, num in DAY_BUTTONS
-    ]
+    buttons = []
+
+    for title, num in DAY_BUTTONS:
+        mark = "✅ " if num in selected_days else ""
+        buttons.append(
+            types.InlineKeyboardButton(f"{mark}{title}", callback_data=f"toggle_day_{num}")
+        )
+
     kb.add(*buttons)
-    kb.row(types.InlineKeyboardButton("❌ Отмена", callback_data="weekday_cancel"))
+    kb.row(
+        types.InlineKeyboardButton("✔ Готово", callback_data="days_done"),
+        types.InlineKeyboardButton("🧹 Очистить", callback_data="days_clear")
+    )
+    kb.row(types.InlineKeyboardButton("❌ Отмена", callback_data="days_cancel"))
     return kb
 
 
@@ -357,7 +470,7 @@ def today_done_keyboard(user_id: int):
     kb = types.InlineKeyboardMarkup()
     pending = [row for row in tasks if row[2] == 0]
 
-    for task_id, task_text, is_done in pending[:20]:
+    for task_id, task_text, _ in pending[:20]:
         short_text = task_text[:25] + ("..." if len(task_text) > 25 else "")
         kb.row(types.InlineKeyboardButton(f"✅ {task_id}. {short_text}", callback_data=f"done_{task_id}"))
 
@@ -371,7 +484,7 @@ def today_delete_keyboard(user_id: int):
     tasks = get_today_tasks(user_id)
     kb = types.InlineKeyboardMarkup()
 
-    for task_id, task_text, is_done in tasks[:20]:
+    for task_id, task_text, _ in tasks[:20]:
         short_text = task_text[:25] + ("..." if len(task_text) > 25 else "")
         kb.row(types.InlineKeyboardButton(f"🗑 {task_id}. {short_text}", callback_data=f"delete_{task_id}"))
 
@@ -388,8 +501,26 @@ def weekly_delete_keyboard(user_id: int):
     for task_id, weekday, task_text in rows[:20]:
         short_text = task_text[:20] + ("..." if len(task_text) > 20 else "")
         kb.row(types.InlineKeyboardButton(
-            f"🗑 {WEEKDAY_NAMES[weekday]}: {short_text}",
+            f"🗑 🔁 {WEEKDAY_NAMES[weekday]}: {short_text}",
             callback_data=f"deleteweekly_{task_id}"
+        ))
+
+    if not rows:
+        kb.row(types.InlineKeyboardButton("Пусто", callback_data="noop"))
+
+    return kb
+
+
+def weekday_once_delete_keyboard(user_id: int):
+    rows = get_weekday_once_tasks(user_id)
+    kb = types.InlineKeyboardMarkup()
+
+    for task_id, weekday, task_text, is_used, added_to_date in rows[:20]:
+        status = "✅" if is_used else "📅"
+        short_text = task_text[:20] + ("..." if len(task_text) > 20 else "")
+        kb.row(types.InlineKeyboardButton(
+            f"🗑 {status} {WEEKDAY_NAMES[weekday]}: {short_text}",
+            callback_data=f"deleteweekdayonce_{task_id}"
         ))
 
     if not rows:
@@ -441,15 +572,36 @@ def format_weekly_tasks(user_id: int) -> str:
     if not rows:
         return "Повторяющихся задач пока нет."
 
-    text = "<b>Повторяющиеся задачи:</b>\n\n"
+    text = "<b>🔁 Повторяющиеся задачи:</b>\n\n"
     current_day = None
 
     for task_id, weekday, task_text in rows:
         if weekday != current_day:
             current_day = weekday
             text += f"\n<b>{WEEKDAY_NAMES[weekday]}</b>\n"
-
         text += f"• <b>{task_id}</b>. {task_text}\n"
+
+    return text
+
+
+def format_weekday_once_tasks(user_id: int) -> str:
+    rows = get_weekday_once_tasks(user_id)
+    if not rows:
+        return "Разовых задач по дням недели пока нет."
+
+    text = "<b>📅 Разовые задачи по дням недели:</b>\n\n"
+    active = [r for r in rows if r[3] == 0]
+    used = [r for r in rows if r[3] == 1]
+
+    if active:
+        text += "<b>Активные:</b>\n"
+        for task_id, weekday, task_text, _, _ in active:
+            text += f"• <b>{task_id}</b>. {WEEKDAY_NAMES[weekday]} — {task_text}\n"
+
+    if used:
+        text += "\n<b>Уже использованные:</b>\n"
+        for task_id, weekday, task_text, _, added_to_date in used:
+            text += f"• <b>{task_id}</b>. {WEEKDAY_NAMES[weekday]} — {task_text} (добавлено {added_to_date})\n"
 
     return text
 
@@ -463,8 +615,9 @@ def start_handler(message):
     text = (
         "Привет! Я бот для задач на день.\n\n"
         "У меня есть:\n"
-        "• обычные задачи — на один день\n"
-        "• повторяющиеся задачи — по дням недели\n\n"
+        "• обычные задачи на сегодня\n"
+        "• задачи по дням недели на один раз\n"
+        "• повторяющиеся задачи по дням недели\n\n"
         "Лучше пользоваться кнопками снизу 👇"
     )
     bot.send_message(message.chat.id, text, reply_markup=main_keyboard())
@@ -474,16 +627,18 @@ def start_handler(message):
 def help_handler(message):
     clear_state(message.from_user.id)
     text = (
-        "<b>Основное:</b>\n"
-        "• Добавить задачу — через кнопку\n"
-        "• Сегодня — список задач на сегодня\n"
-        "• Выполнить — отметить задачу\n"
-        "• Удалить — удалить задачу\n"
-        "• Повторяющиеся — посмотреть задачи по дням недели\n"
-        "• Добавить задачи дня — взять повторяющиеся задачи на сегодня\n\n"
-        "<b>Дополнительно:</b>\n"
-        "• <code>/day 2026-04-20</code> — посмотреть задачи за дату\n"
-        "• <code>/history</code> — история\n"
+        "<b>Что есть:</b>\n"
+        "• На сегодня — обычная задача\n"
+        "• По дням недели (один раз) — добавится в нужный день и больше не повторится\n"
+        "• Повторяющаяся — будет доступна каждую неделю\n\n"
+        "<b>Кнопки:</b>\n"
+        "• Добавить задачу\n"
+        "• Сегодня\n"
+        "• Выполнить\n"
+        "• Удалить\n"
+        "• По дням недели\n"
+        "• Повторяющиеся\n"
+        "• Добавить задачи дня\n"
     )
     bot.send_message(message.chat.id, text, reply_markup=main_keyboard())
 
@@ -528,33 +683,26 @@ def day_handler(message):
     )
 
 
-@bot.message_handler(commands=["weekly"])
-def weekly_handler(message):
-    clear_state(message.from_user.id)
-    bot.send_message(
-        message.chat.id,
-        format_weekly_tasks(message.from_user.id),
-        reply_markup=main_keyboard()
-    )
-
-
 @bot.message_handler(commands=["todayauto"])
 def todayauto_handler(message):
     clear_state(message.from_user.id)
-    count = add_today_tasks_from_weekday(message.from_user.id)
+    added_once, added_repeat = add_today_tasks_from_weekday(message.from_user.id)
     today_name = WEEKDAY_NAMES[date.today().weekday()]
+    total = added_once + added_repeat
 
-    if count == 0:
+    if total == 0:
         bot.send_message(
             message.chat.id,
-            f"На сегодня ({today_name}) новых повторяющихся задач не добавлено.",
+            f"На сегодня ({today_name}) новых задач по дню недели не добавлено.",
             reply_markup=main_keyboard()
         )
         return
 
     bot.send_message(
         message.chat.id,
-        f"📥 На сегодня ({today_name}) добавлено задач: <b>{count}</b>",
+        f"📥 На сегодня ({today_name}) добавлено задач: <b>{total}</b>\n"
+        f"📅 Разовых: {added_once}\n"
+        f"🔁 Повторяющихся: {added_repeat}",
         reply_markup=main_keyboard()
     )
 
@@ -587,16 +735,8 @@ def cancel_handler(message):
 @bot.message_handler(func=lambda message: message.text == "➕ Добавить задачу")
 def btn_add_task(message):
     clear_state(message.from_user.id)
-    bot.send_message(
-        message.chat.id,
-        "Какую задачу хочешь добавить?",
-        reply_markup=main_keyboard()
-    )
-    bot.send_message(
-        message.chat.id,
-        "Выбери тип:",
-        reply_markup=add_task_type_keyboard()
-    )
+    bot.send_message(message.chat.id, "Какую задачу хочешь добавить?", reply_markup=main_keyboard())
+    bot.send_message(message.chat.id, "Выбери тип:", reply_markup=add_task_type_keyboard())
 
 
 @bot.message_handler(func=lambda message: message.text == "📋 Сегодня")
@@ -612,15 +752,22 @@ def btn_history(message):
 @bot.message_handler(func=lambda message: message.text == "🔁 Повторяющиеся")
 def btn_weekly(message):
     clear_state(message.from_user.id)
-    bot.send_message(
-        message.chat.id,
-        format_weekly_tasks(message.from_user.id),
-        reply_markup=main_keyboard()
-    )
+    bot.send_message(message.chat.id, format_weekly_tasks(message.from_user.id), reply_markup=main_keyboard())
     bot.send_message(
         message.chat.id,
         "Удалить повторяющуюся задачу:",
         reply_markup=weekly_delete_keyboard(message.from_user.id)
+    )
+
+
+@bot.message_handler(func=lambda message: message.text == "📅 По дням недели")
+def btn_weekday_once(message):
+    clear_state(message.from_user.id)
+    bot.send_message(message.chat.id, format_weekday_once_tasks(message.from_user.id), reply_markup=main_keyboard())
+    bot.send_message(
+        message.chat.id,
+        "Удалить разовую задачу по дням недели:",
+        reply_markup=weekday_once_delete_keyboard(message.from_user.id)
     )
 
 
@@ -670,45 +817,109 @@ def btn_help(message):
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
     user_id = call.from_user.id
+    state = get_state(user_id)
 
     if call.data == "noop":
         bot.answer_callback_query(call.id)
         return
 
-    if call.data == "add_type_once":
+    if call.data == "add_type_once_today":
         clear_state(user_id)
-        set_state(user_id, {"mode": "add_once"})
-        bot.answer_callback_query(call.id, "Выбрана обычная задача")
-        bot.send_message(call.message.chat.id, "Напиши текст обычной задачи на сегодня.")
+        set_state(user_id, {"mode": "add_once_today"})
+        bot.answer_callback_query(call.id, "Выбрана задача на сегодня")
+        bot.send_message(call.message.chat.id, "Напиши текст задачи на сегодня.")
+        return
+
+    if call.data == "add_type_weekday_once":
+        clear_state(user_id)
+        set_state(user_id, {"mode": "select_days_once", "selected_days": []})
+        bot.answer_callback_query(call.id, "Выбран режим: по дням недели один раз")
+        bot.send_message(
+            call.message.chat.id,
+            "Выбери один или несколько дней недели:",
+            reply_markup=selected_days_keyboard(set())
+        )
         return
 
     if call.data == "add_type_weekly":
         clear_state(user_id)
-        set_state(user_id, {"mode": "choose_weekday"})
-        bot.answer_callback_query(call.id, "Выбрана повторяющаяся задача")
+        set_state(user_id, {"mode": "select_days_weekly", "selected_days": []})
+        bot.answer_callback_query(call.id, "Выбран режим: повторяющаяся")
         bot.send_message(
             call.message.chat.id,
-            "Выбери день недели:",
-            reply_markup=weekday_keyboard()
+            "Выбери один или несколько дней недели:",
+            reply_markup=selected_days_keyboard(set())
         )
         return
 
-    if call.data == "weekday_cancel":
+    if call.data == "days_cancel":
         clear_state(user_id)
         bot.answer_callback_query(call.id, "Отменено")
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
         bot.send_message(call.message.chat.id, "Добавление отменено.", reply_markup=main_keyboard())
         return
 
-    if call.data.startswith("weekday_"):
-        weekday = int(call.data.split("_")[1])
-        clear_state(user_id)
-        set_state(user_id, {"mode": "add_weekly_text", "weekday": weekday})
-        bot.answer_callback_query(call.id, f"Выбран день: {WEEKDAY_NAMES[weekday]}")
-        bot.send_message(
+    if call.data == "days_clear":
+        if isinstance(state, dict):
+            state["selected_days"] = []
+            set_state(user_id, state)
+        bot.answer_callback_query(call.id, "Дни очищены")
+        bot.edit_message_reply_markup(
             call.message.chat.id,
-            f"Напиши текст повторяющейся задачи для дня <b>{WEEKDAY_NAMES[weekday]}</b>."
+            call.message.message_id,
+            reply_markup=selected_days_keyboard(set())
         )
         return
+
+    if call.data.startswith("toggle_day_"):
+        day_num = int(call.data.split("_")[2])
+        if not isinstance(state, dict):
+            bot.answer_callback_query(call.id, "Сессия сбилась")
+            return
+
+        selected = set(state.get("selected_days", []))
+        if day_num in selected:
+            selected.remove(day_num)
+        else:
+            selected.add(day_num)
+
+        state["selected_days"] = sorted(selected)
+        set_state(user_id, state)
+
+        bot.answer_callback_query(call.id, "Выбор обновлён")
+        bot.edit_message_reply_markup(
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=selected_days_keyboard(selected)
+        )
+        return
+
+    if call.data == "days_done":
+        if not isinstance(state, dict):
+            bot.answer_callback_query(call.id, "Сессия сбилась")
+            return
+
+        selected = state.get("selected_days", [])
+        if not selected:
+            bot.answer_callback_query(call.id, "Сначала выбери хотя бы один день")
+            return
+
+        mode = state.get("mode")
+        if mode == "select_days_once":
+            set_state(user_id, {"mode": "add_weekday_once_text", "selected_days": selected})
+            bot.answer_callback_query(call.id, "Дни выбраны")
+            bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+            days_text = ", ".join(WEEKDAY_NAMES[d] for d in selected)
+            bot.send_message(call.message.chat.id, f"Выбраны дни: <b>{days_text}</b>\nТеперь напиши текст задачи.")
+            return
+
+        if mode == "select_days_weekly":
+            set_state(user_id, {"mode": "add_weekly_text", "selected_days": selected})
+            bot.answer_callback_query(call.id, "Дни выбраны")
+            bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+            days_text = ", ".join(WEEKDAY_NAMES[d] for d in selected)
+            bot.send_message(call.message.chat.id, f"Выбраны дни: <b>{days_text}</b>\nТеперь напиши текст повторяющейся задачи.")
+            return
 
     if call.data.startswith("done_"):
         task_id = int(call.data.split("_")[1])
@@ -741,6 +952,18 @@ def callback_handler(call):
             bot.send_message(call.message.chat.id, "🗑 Повторяющаяся задача удалена.", reply_markup=main_keyboard())
         else:
             bot.answer_callback_query(call.id, "Не найдено")
+        return
+
+    if call.data.startswith("deleteweekdayonce_"):
+        task_id = int(call.data.split("_")[1])
+        ok = delete_weekday_once_task(user_id, task_id)
+        if ok:
+            bot.answer_callback_query(call.id, "Разовая задача по дням недели удалена")
+            bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+            bot.send_message(call.message.chat.id, "🗑 Разовая задача по дням недели удалена.", reply_markup=main_keyboard())
+        else:
+            bot.answer_callback_query(call.id, "Не найдено")
+        return
 
 
 # =========================
@@ -755,7 +978,7 @@ def free_text_handler(message):
     if isinstance(state, dict):
         mode = state.get("mode")
 
-        if mode == "add_once":
+        if mode == "add_once_today":
             if not text:
                 bot.reply_to(message, "Текст задачи не должен быть пустым.")
                 return
@@ -764,14 +987,14 @@ def free_text_handler(message):
             clear_state(user_id)
             bot.send_message(
                 message.chat.id,
-                f"📝 Обычная задача добавлена:\n<b>{text}</b>",
+                f"📝 Задача на сегодня добавлена:\n<b>{text}</b>",
                 reply_markup=main_keyboard()
             )
             return
 
-        if mode == "add_weekly_text":
-            weekday = state.get("weekday")
-            if weekday is None:
+        if mode == "add_weekday_once_text":
+            selected_days = state.get("selected_days", [])
+            if not selected_days:
                 clear_state(user_id)
                 bot.reply_to(message, "Что-то сбилось. Попробуй ещё раз.")
                 return
@@ -780,11 +1003,39 @@ def free_text_handler(message):
                 bot.reply_to(message, "Текст задачи не должен быть пустым.")
                 return
 
-            add_weekly_task(user_id, weekday, text)
+            for weekday in selected_days:
+                add_weekday_once_task(user_id, weekday, text)
+
+            days_text = ", ".join(WEEKDAY_NAMES[d] for d in selected_days)
             clear_state(user_id)
             bot.send_message(
                 message.chat.id,
-                f"🔁 Повторяющаяся задача добавлена:\n<b>{WEEKDAY_NAMES[weekday]}</b> — {text}",
+                f"📅 Разовая задача по дням недели добавлена:\n"
+                f"<b>{days_text}</b>\n{text}",
+                reply_markup=main_keyboard()
+            )
+            return
+
+        if mode == "add_weekly_text":
+            selected_days = state.get("selected_days", [])
+            if not selected_days:
+                clear_state(user_id)
+                bot.reply_to(message, "Что-то сбилось. Попробуй ещё раз.")
+                return
+
+            if not text:
+                bot.reply_to(message, "Текст задачи не должен быть пустым.")
+                return
+
+            for weekday in selected_days:
+                add_weekly_task(user_id, weekday, text)
+
+            days_text = ", ".join(WEEKDAY_NAMES[d] for d in selected_days)
+            clear_state(user_id)
+            bot.send_message(
+                message.chat.id,
+                f"🔁 Повторяющаяся задача добавлена:\n"
+                f"<b>{days_text}</b>\n{text}",
                 reply_markup=main_keyboard()
             )
             return
