@@ -4,7 +4,7 @@ from datetime import datetime, date, timedelta
 import telebot
 from telebot import types
 
-TOKEN = os.getenv("7984193383:AAHlTX1pbXNfpW8qhknMTJTSmtvDdgctK9Y")
+TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise ValueError("Не найден BOT_TOKEN")
 
