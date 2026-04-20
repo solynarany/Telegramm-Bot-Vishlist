@@ -431,10 +431,10 @@ def main_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("➕ Добавить задачу", "📋 Сегодня")
     kb.row("✅ Выполнить", "🗑 Удалить")
-    kb.row("📜 История", "🔁 Повторяющиеся")
-    kb.row("📅 По дням недели", "📥 Добавить задачи дня")
-    kb.row("🔄 Перенести невыполненные", "❌ Отмена")
-    kb.row("ℹ️ Помощь")
+    kb.row("📜 История", "🗓 Неделя")
+    kb.row("🔁 Повторяющиеся", "📅 По дням недели")
+    kb.row("📥 Добавить задачи дня", "🔄 Перенести невыполненные")
+    kb.row("❌ Отмена", "ℹ️ Помощь")
     return kb
 
 
@@ -605,7 +605,70 @@ def format_weekday_once_tasks(user_id: int) -> str:
 
     return text
 
+def get_start_of_week(target_date: date | None = None) -> date:
+    if target_date is None:
+        target_date = date.today()
+    return target_date - timedelta(days=target_date.weekday())
 
+
+def build_week_overview(user_id: int) -> str:
+    week_start = get_start_of_week()
+    week_end = week_start + timedelta(days=6)
+
+    text = (
+        f"<b>Задачи на неделю</b>\n"
+        f"{week_start.strftime('%Y-%m-%d')} — {week_end.strftime('%Y-%m-%d')}\n\n"
+    )
+
+    weekly_rows = get_weekly_tasks(user_id)
+    weekly_by_day = {}
+    for _, weekday, task_text in weekly_rows:
+        weekly_by_day.setdefault(weekday, []).append(task_text)
+
+    weekday_once_rows = get_weekday_once_tasks(user_id)
+    weekday_once_by_day = {}
+    for _, weekday, task_text, is_used, added_to_date in weekday_once_rows:
+        # показываем только ещё не использованные разовые задачи по дням недели
+        if is_used == 0:
+            weekday_once_by_day.setdefault(weekday, []).append(task_text)
+
+    for i in range(7):
+        current_day = week_start + timedelta(days=i)
+        weekday_num = current_day.weekday()
+        day_str = current_day.strftime("%Y-%m-%d")
+
+        text += f"<b>{WEEKDAY_NAMES[weekday_num]}</b> ({day_str})\n"
+
+        normal_tasks = get_tasks_by_date(user_id, day_str)
+        has_any = False
+
+        if normal_tasks:
+            has_any = True
+            text += "Обычные задачи:\n"
+            for task_id, task_text, is_done in normal_tasks:
+                status = "✅" if is_done else "⬜"
+                text += f"{status} <b>{task_id}</b>. {task_text}\n"
+
+        once_tasks = weekday_once_by_day.get(weekday_num, [])
+        if once_tasks:
+            has_any = True
+            text += "📅 Разовые по дню недели:\n"
+            for task_text in once_tasks:
+                text += f"• {task_text}\n"
+
+        repeat_tasks = weekly_by_day.get(weekday_num, [])
+        if repeat_tasks:
+            has_any = True
+            text += "🔁 Повторяющиеся:\n"
+            for task_text in repeat_tasks:
+                text += f"• {task_text}\n"
+
+        if not has_any:
+            text += "— пусто\n"
+
+        text += "\n"
+
+    return text
 # =========================
 # КОМАНДЫ
 # =========================
@@ -790,7 +853,15 @@ def btn_done(message):
         reply_markup=today_done_keyboard(message.from_user.id)
     )
 
-
+@bot.message_handler(commands=["week"])
+def week_handler(message):
+    clear_state(message.from_user.id)
+    bot.send_message(
+        message.chat.id,
+        build_week_overview(message.from_user.id),
+        reply_markup=main_keyboard()
+    )
+    
 @bot.message_handler(func=lambda message: message.text == "🗑 Удалить")
 def btn_delete(message):
     clear_state(message.from_user.id)
@@ -804,11 +875,30 @@ def btn_delete(message):
 @bot.message_handler(func=lambda message: message.text == "❌ Отмена")
 def btn_cancel(message):
     cancel_handler(message)
+    
+@bot.message_handler(func=lambda message: message.text == "🗓 Неделя")
+def btn_week(message):
+    week_handler(message)
 
-
-@bot.message_handler(func=lambda message: message.text == "ℹ️ Помощь")
-def btn_help(message):
-    help_handler(message)
+@bot.message_handler(commands=["help"])
+def help_handler(message):
+    clear_state(message.from_user.id)
+    text = (
+        "<b>Что есть:</b>\n"
+        "• На сегодня — обычная задача\n"
+        "• По дням недели (один раз) — добавится в нужный день и больше не повторится\n"
+        "• Повторяющаяся — будет доступна каждую неделю\n\n"
+        "<b>Кнопки:</b>\n"
+        "• Добавить задачу\n"
+        "• Сегодня\n"
+        "• Неделя\n"
+        "• Выполнить\n"
+        "• Удалить\n"
+        "• По дням недели\n"
+        "• Повторяющиеся\n"
+        "• Добавить задачи дня\n"
+    )
+    bot.send_message(message.chat.id, text, reply_markup=main_keyboard())
 
 
 # =========================
