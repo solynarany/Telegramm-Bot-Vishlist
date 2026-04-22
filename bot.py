@@ -715,14 +715,30 @@ def history_handler(message):
 @bot.message_handler(commands=["today"])
 def today_handler(message):
     clear_state(message.from_user.id)
+
+    added_once, added_repeat = add_today_tasks_from_weekday(message.from_user.id)
+
     weekday_name = WEEKDAY_NAMES[date.today().weekday()]
     tasks = get_today_tasks(message.from_user.id)
-    bot.send_message(
-        message.chat.id,
-        format_tasks(tasks, f"Дела на {date.today().strftime('%Y-%m-%d')} ({weekday_name})"),
-        reply_markup=main_keyboard()
+
+    text = format_tasks(
+        tasks,
+        f"Дела на {date.today().strftime('%Y-%m-%d')} ({weekday_name})"
     )
 
+    added_total = added_once + added_repeat
+    if added_total > 0:
+        text += (
+            f"\n\n📥 Автоматически добавлено задач дня: <b>{added_total}</b>"
+            f"\n📅 Разовых: {added_once}"
+            f"\n🔁 Повторяющихся: {added_repeat}"
+        )
+
+    bot.send_message(
+        message.chat.id,
+        text,
+        reply_markup=main_keyboard()
+    )
 
 @bot.message_handler(commands=["day"])
 def day_handler(message):
